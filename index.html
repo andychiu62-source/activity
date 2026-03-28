@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>太陽帝國社區兒童節｜認識我的家</title>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&family=Noto+Sans+TC:wght@400;700;900&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.min.js"></script>
 <style>
   :root {
     --sun:#FFD93D; --orange:#FF6B35; --sky:#4ECDC4;
@@ -449,72 +448,101 @@ function showFeedback(id) {
   setTimeout(() => el.classList.remove('show'), 2200);
 }
 
-// ===== QR SCANNER =====
-let scannerStream=null, scannerActive=false, scanInterval=null, scanCount=0;
+// ===== QR SCANNER (ZXing) =====
+let scannerControls = null;
+let codeReader = null;
 
 function dbg(msg){ const el=document.getElementById('debugBar'); if(el) el.innerHTML=msg; }
 
 async function openScanner() {
-  scanCount=0;
-  dbg('正在開啟相機...');
+  dbg('正在載入掃描器...');
   document.getElementById('scannerOverlay').classList.add('show');
+
   try {
-    try {
-      scannerStream = await navigator.mediaDevices.getUserMedia({
-        video:{ facingMode:{exact:'environment'} }
-      });
-      dbg('✅ 後鏡頭開啟成功');
-    } catch(e) {
-      dbg('⚠️ 後鏡頭失敗，改用前鏡頭...');
-      scannerStream = await navigator.mediaDevices.getUserMedia({ video:true });
-      dbg('✅ 前鏡頭開啟成功');
+    // 動態載入 ZXing
+    if(!window.ZXing) {
+      dbg('載入 ZXing...');
+      await loadScript('https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js');
+      dbg('ZXing 載入完成');
     }
+
+    const hints = new Map();
+    hints.set(window.ZXing.DecodeHintType.TRY_HARDER, true);
+
+    codeReader = new window.ZXing.BrowserMultiFormatReader(hints);
+    dbg('✅ 掃描器初始化完成，開啟相機...');
+
     const video = document.getElementById('qrVideo');
-    video.srcObject = scannerStream;
-    video.onloadedmetadata = () => { dbg('✅ 相機畫面載入，開始掃描...'); };
-    await video.play();
-    scannerActive = true;
-    scanInterval = setInterval(scanFrame, 300);
+
+    // 取得後鏡頭裝置
+    const devices = await window.ZXing.BrowserCodeReader.listVideoInputDevices();
+    dbg('找到 '+devices.length+' 個鏡頭');
+
+    // 優先選後鏡頭
+    let deviceId = undefined;
+    if(devices.length > 1) {
+      const back = devices.find(d =>
+        d.label.toLowerCase().includes('back') ||
+        d.label.toLowerCase().includes('rear') ||
+        d.label.toLowerCase().includes('後') ||
+        d.label.toLowerCase().includes('environment')
+      );
+      if(back) deviceId = back.deviceId;
+      else deviceId = devices[devices.length-1].deviceId; // 通常最後一個是後鏡頭
+    }
+
+    dbg('使用鏡頭: ' + (deviceId ? deviceId.slice(0,20)+'...' : '預設'));
+
+    scannerControls = await codeReader.decodeFromVideoDevice(
+      deviceId,
+      video,
+      (result, err) => {
+        if(result) {
+          dbg('✅ 掃到了！→ ' + result.getText().slice(0,50));
+          stopScanner();
+          handleQRResult(result.getText());
+        } else if(err && !(err instanceof window.ZXing.NotFoundException)) {
+          dbg('掃描錯誤: ' + err.message);
+        } else {
+          dbg('掃描中... 請將 QR Code 對準框內');
+        }
+      }
+    );
+
+    dbg('相機開啟中...');
+
   } catch(e) {
-    dbg('❌ 錯誤：' + e.message);
-    alert('無法開啟相機：' + (e.message||e));
+    dbg('❌ 錯誤: ' + e.message);
+    alert('無法開啟相機：' + e.message + '\n\n請確認已允許相機權限。');
     closeScanner();
   }
 }
 
-function closeScanner() {
-  scannerActive = false;
-  if(scanInterval){ clearInterval(scanInterval); scanInterval=null; }
-  if(scannerStream){ scannerStream.getTracks().forEach(t=>t.stop()); scannerStream=null; }
-  document.getElementById('scannerOverlay').classList.remove('show');
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error('載入失敗: ' + src));
+    document.head.appendChild(s);
+  });
 }
 
-function scanFrame() {
-  if(!scannerActive) return;
-  const video=document.getElementById('qrVideo');
-  scanCount++;
-  const w=video.videoWidth, h=video.videoHeight;
-  if(video.readyState < 2 || w===0){ dbg('等待畫面... readyState='+video.readyState); return; }
-
-  const canvas=document.getElementById('qrCanvas');
-  const SW=300, SH=Math.round(h*SW/w);
-  canvas.width=SW; canvas.height=SH;
-  const ctx=canvas.getContext('2d');
-  ctx.drawImage(video,0,0,SW,SH);
-  const imgData=ctx.getImageData(0,0,SW,SH);
-
-  let code=null;
-  for(const m of ['dontInvert','onlyInvert','attemptBoth','invertFirst']){
-    code=jsQR(imgData.data,SW,SH,{inversionAttempts:m});
-    if(code){ dbg('✅ 辨識成功！→ '+code.data.slice(0,50)); break; }
+function stopScanner() {
+  if(scannerControls) {
+    try { scannerControls.stop(); } catch(e){}
+    scannerControls = null;
   }
-
-  if(code){
-    clearInterval(scanInterval); scanInterval=null;
-    handleQRResult(code.data);
-  } else {
-    dbg('掃描中 #'+scanCount+'｜畫面'+w+'x'+h+'｜未偵測到QR Code，請靠近一點');
+  if(codeReader) {
+    try { codeReader.reset(); } catch(e){}
+    codeReader = null;
   }
+}
+
+function closeScanner() {
+  stopScanner();
+  document.getElementById('scannerOverlay').classList.remove('show');
+  dbg('等待開啟...');
 }
 
 function handleQRResult(data) {
