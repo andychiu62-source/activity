@@ -312,6 +312,7 @@
     </div>
     <div class="scan-hint">📱 靠近一點，QR Code 對準框內<br><small style="opacity:.7;font-size:12px">保持穩定，約1~2秒自動辨識</small></div>
     <div class="scan-success-flash" id="scanFlash">⭐</div>
+    <div id="debugBar" style="position:absolute;bottom:0;left:0;right:0;background:rgba(0,0,0,0.75);color:#0f0;font-size:12px;padding:8px 12px;font-family:monospace;line-height:1.6;z-index:10;">等待相機...</div>
   </div>
 </div>
 
@@ -449,28 +450,34 @@ function showFeedback(id) {
 }
 
 // ===== QR SCANNER =====
-let scannerStream=null, scannerActive=false, scanInterval=null;
+let scannerStream=null, scannerActive=false, scanInterval=null, scanCount=0;
+
+function dbg(msg){ const el=document.getElementById('debugBar'); if(el) el.innerHTML=msg; }
 
 async function openScanner() {
+  scanCount=0;
+  dbg('正在開啟相機...');
   document.getElementById('scannerOverlay').classList.add('show');
   try {
-    // 先嘗試後鏡頭，失敗則用任何鏡頭
     try {
       scannerStream = await navigator.mediaDevices.getUserMedia({
         video:{ facingMode:{exact:'environment'} }
       });
+      dbg('✅ 後鏡頭開啟成功');
     } catch(e) {
+      dbg('⚠️ 後鏡頭失敗，改用前鏡頭...');
       scannerStream = await navigator.mediaDevices.getUserMedia({ video:true });
+      dbg('✅ 前鏡頭開啟成功');
     }
     const video = document.getElementById('qrVideo');
     video.srcObject = scannerStream;
+    video.onloadedmetadata = () => { dbg('✅ 相機畫面載入，開始掃描...'); };
     await video.play();
     scannerActive = true;
-    // 每 200ms 掃一次（比 requestAnimationFrame 穩定，讓 jsQR 有足夠時間）
-    scanInterval = setInterval(scanFrame, 200);
+    scanInterval = setInterval(scanFrame, 300);
   } catch(e) {
-    alert('無法開啟相機：' + (e.message||e) +
-      '\n\n請確認已允許相機權限。\n注意：相機功能需在 HTTPS 網站才能使用（GitHub Pages 已支援）。');
+    dbg('❌ 錯誤：' + e.message);
+    alert('無法開啟相機：' + (e.message||e));
     closeScanner();
   }
 }
@@ -485,27 +492,28 @@ function closeScanner() {
 function scanFrame() {
   if(!scannerActive) return;
   const video=document.getElementById('qrVideo');
-  if(video.readyState !== video.HAVE_ENOUGH_DATA) return;
+  scanCount++;
+  const w=video.videoWidth, h=video.videoHeight;
+  if(video.readyState < 2 || w===0){ dbg('等待畫面... readyState='+video.readyState); return; }
 
   const canvas=document.getElementById('qrCanvas');
+  const SW=300, SH=Math.round(h*SW/w);
+  canvas.width=SW; canvas.height=SH;
+  const ctx=canvas.getContext('2d');
+  ctx.drawImage(video,0,0,SW,SH);
+  const imgData=ctx.getImageData(0,0,SW,SH);
 
-  // 縮小到 400px 寬，jsQR 辨識更快更準
-  const SCAN_W = 400;
-  const ratio = SCAN_W / video.videoWidth;
-  canvas.width  = SCAN_W;
-  canvas.height = Math.round(video.videoHeight * ratio);
+  let code=null;
+  for(const m of ['dontInvert','onlyInvert','attemptBoth','invertFirst']){
+    code=jsQR(imgData.data,SW,SH,{inversionAttempts:m});
+    if(code){ dbg('✅ 辨識成功！→ '+code.data.slice(0,50)); break; }
+  }
 
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-  // 試兩種模式：正常 + 反色（應對深色背景QRCode）
-  let code = jsQR(imageData.data, canvas.width, canvas.height, {inversionAttempts:'dontInvert'});
-  if(!code) code = jsQR(imageData.data, canvas.width, canvas.height, {inversionAttempts:'onlyInvert'});
-
-  if(code) {
-    clearInterval(scanInterval); scanInterval=null; // 停止繼續掃
+  if(code){
+    clearInterval(scanInterval); scanInterval=null;
     handleQRResult(code.data);
+  } else {
+    dbg('掃描中 #'+scanCount+'｜畫面'+w+'x'+h+'｜未偵測到QR Code，請靠近一點');
   }
 }
 
