@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>太陽帝國社區兒童節｜認識我的家</title>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&family=Noto+Sans+TC:wght@400;700;900&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.min.js"></script>
 <style>
   :root {
     --sun:#FFD93D; --orange:#FF6B35; --sky:#4ECDC4;
@@ -450,71 +449,110 @@ function showFeedback(id) {
 }
 
 // ===== QR SCANNER =====
-let scannerStream=null, scannerActive=false, scanInterval=null, scanCount=0;
+// 使用原生 getUserMedia + jsQR（從 CDN 動態載入）
+let scannerStream = null;
+let scannerTimer = null;
+let jsqrReady = false;
 
-function dbg(msg){ const el=document.getElementById('debugBar'); if(el) el.innerHTML=msg; }
+function dbg(msg){ const el=document.getElementById('debugBar'); if(el) el.textContent=msg; }
+
+// 預先載入 jsQR
+(function loadJsQR(){
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+  s.onload = () => { jsqrReady = true; console.log('jsQR ready'); };
+  s.onerror = () => {
+    // 備用 CDN
+    const s2 = document.createElement('script');
+    s2.src = 'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js';
+    s2.onload = () => { jsqrReady = true; };
+    document.head.appendChild(s2);
+  };
+  document.head.appendChild(s);
+})();
 
 async function openScanner() {
-  scanCount=0;
-  dbg('正在開啟相機...');
   document.getElementById('scannerOverlay').classList.add('show');
+  dbg('正在要求相機權限...');
+
   try {
-    try {
-      scannerStream = await navigator.mediaDevices.getUserMedia({
-        video:{ facingMode:{exact:'environment'} }
-      });
-      dbg('✅ 後鏡頭開啟成功');
-    } catch(e) {
-      dbg('⚠️ 後鏡頭失敗，改用前鏡頭...');
-      scannerStream = await navigator.mediaDevices.getUserMedia({ video:true });
-      dbg('✅ 前鏡頭開啟成功');
-    }
+    // 最簡單的方式請求相機，不加任何限制
+    scannerStream = await navigator.mediaDevices.getUserMedia({ video: true });
+
     const video = document.getElementById('qrVideo');
     video.srcObject = scannerStream;
-    video.onloadedmetadata = () => { dbg('✅ 相機畫面載入，開始掃描...'); };
-    await video.play();
-    scannerActive = true;
-    scanInterval = setInterval(scanFrame, 300);
+    video.setAttribute('playsinline', true);
+    video.setAttribute('muted', true);
+    video.play();
+
+    dbg('相機開啟成功，等待畫面...');
+
+    // 等影像穩定後開始掃描
+    video.addEventListener('playing', function onPlaying(){
+      video.removeEventListener('playing', onPlaying);
+      dbg('開始掃描，請對準 QR Code');
+      startScanning(video);
+    });
+
   } catch(e) {
-    dbg('❌ 錯誤：' + e.message);
-    alert('無法開啟相機：' + (e.message||e));
+    dbg('❌ ' + e.name + ': ' + e.message);
+    // 給用戶友善的錯誤說明
+    let msg = '無法開啟相機。\n\n';
+    if(e.name === 'NotAllowedError') {
+      msg += '❌ 相機權限被拒絕。\n請到手機「設定 → Safari/Chrome → 相機」，改為允許。';
+    } else if(e.name === 'NotFoundError') {
+      msg += '❌ 找不到相機裝置。';
+    } else {
+      msg += e.name + ': ' + e.message;
+    }
+    alert(msg);
     closeScanner();
   }
 }
 
-function closeScanner() {
-  scannerActive = false;
-  if(scanInterval){ clearInterval(scanInterval); scanInterval=null; }
-  if(scannerStream){ scannerStream.getTracks().forEach(t=>t.stop()); scannerStream=null; }
-  document.getElementById('scannerOverlay').classList.remove('show');
+function startScanning(video) {
+  if(scannerTimer) clearInterval(scannerTimer);
+
+  scannerTimer = setInterval(() => {
+    if(!video.videoWidth) { dbg('等待畫面...'); return; }
+
+    const canvas = document.getElementById('qrCanvas');
+    // 縮小到 320px，jsQR 最穩定的尺寸
+    const W = 320;
+    const H = Math.round(video.videoHeight * W / video.videoWidth);
+    canvas.width = W;
+    canvas.height = H;
+
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, W, H);
+
+    if(!jsqrReady) { dbg('jsQR 載入中...'); return; }
+
+    const d = ctx.getImageData(0, 0, W, H);
+    // 試兩種模式
+    const code = jsQR(d.data, W, H, {inversionAttempts: 'attemptBoth'});
+
+    if(code) {
+      dbg('✅ 掃到！' + code.data.slice(0,40));
+      clearInterval(scannerTimer); scannerTimer = null;
+      // 閃光
+      const flash = document.getElementById('scanFlash');
+      flash.classList.add('show');
+      setTimeout(() => {
+        flash.classList.remove('show');
+        closeScanner();
+        handleQRResult(code.data);
+      }, 600);
+    } else {
+      dbg('掃描中... 畫面=' + video.videoWidth + 'x' + video.videoHeight);
+    }
+  }, 400);
 }
 
-function scanFrame() {
-  if(!scannerActive) return;
-  const video=document.getElementById('qrVideo');
-  scanCount++;
-  const w=video.videoWidth, h=video.videoHeight;
-  if(video.readyState < 2 || w===0){ dbg('等待畫面... readyState='+video.readyState); return; }
-
-  const canvas=document.getElementById('qrCanvas');
-  const SW=300, SH=Math.round(h*SW/w);
-  canvas.width=SW; canvas.height=SH;
-  const ctx=canvas.getContext('2d');
-  ctx.drawImage(video,0,0,SW,SH);
-  const imgData=ctx.getImageData(0,0,SW,SH);
-
-  let code=null;
-  for(const m of ['dontInvert','onlyInvert','attemptBoth','invertFirst']){
-    code=jsQR(imgData.data,SW,SH,{inversionAttempts:m});
-    if(code){ dbg('✅ 辨識成功！→ '+code.data.slice(0,50)); break; }
-  }
-
-  if(code){
-    clearInterval(scanInterval); scanInterval=null;
-    handleQRResult(code.data);
-  } else {
-    dbg('掃描中 #'+scanCount+'｜畫面'+w+'x'+h+'｜未偵測到QR Code，請靠近一點');
-  }
+function closeScanner() {
+  if(scannerTimer){ clearInterval(scannerTimer); scannerTimer=null; }
+  if(scannerStream){ scannerStream.getTracks().forEach(t => t.stop()); scannerStream=null; }
+  document.getElementById('scannerOverlay').classList.remove('show');
 }
 
 function handleQRResult(data) {
