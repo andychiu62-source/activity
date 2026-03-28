@@ -477,7 +477,17 @@ async function openScanner() {
 
   try {
     // 最簡單的方式請求相機，不加任何限制
-    scannerStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    // 強制使用後鏡頭
+    try {
+      scannerStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { exact: 'environment' } }
+      });
+    } catch(e2) {
+      // exact 失敗則用 ideal（不強制）
+      scannerStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' }
+      });
+    }
 
     const video = document.getElementById('qrVideo');
     video.srcObject = scannerStream;
